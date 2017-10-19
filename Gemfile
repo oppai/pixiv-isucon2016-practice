@@ -9,3 +9,5 @@ gem "unicorn"
 gem "mysql2"
 gem "rack-flash3"
 gem 'rack-lineprof'
+gem 'redis'
+gem 'parallel'

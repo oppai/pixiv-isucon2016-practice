@@ -3,6 +3,8 @@ require 'mysql2'
 require 'rack-flash'
 require 'shellwords'
 require "rack-lineprof"
+require 'redis'
+require 'parallel'
 
 module Isuconp
   class App < Sinatra::Base
@@ -16,6 +18,13 @@ module Isuconp
     POSTS_PER_PAGE = 20
 
     helpers do
+      def redis
+        unless @redis
+          @redis = Redis.new
+        end
+        @redis
+      end
+
       def config
         @config ||= {
           db: {
@@ -28,7 +37,7 @@ module Isuconp
         }
       end
 
-      def db
+      def db()
         return Thread.current[:isuconp_db] if Thread.current[:isuconp_db]
         client = Mysql2::Client.new(
           host: config[:db][:host],
@@ -99,6 +108,41 @@ module Isuconp
         end
       end
 
+      def get_first_posts()
+      	# @@posts_result ||= 
+        Thread.current[:first_posts] ||= db.query('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC LIMIT ' + (POSTS_PER_PAGE+100).to_s).to_a(:as => :hash)
+      end
+      def expire_first_posts()
+        # @@posts_result = nil
+        Thread.current[:first_posts] = nil
+      end
+      def get_make_posts()
+        results = get_first_posts()
+        Thread.current[:make_posts] ||= make_posts(results)
+      end
+      def expire_make_posts()
+        Thread.current[:make_posts] = nil
+      end
+
+      def comment_count_init(user_id)
+        key = "user_comment" + user_id.to_s
+        Thread.current[key.to_sym] = 0
+      end
+      def comment_count_increment(user_id)
+        key = "user_comment" + user_id.to_s
+        unless Thread.current[key.to_sym]
+          Thread.current[key.to_sym] = get_comment_count(user_id) + 1
+        else
+          Thread.current[key.to_sym] += 1
+        end
+      end
+      def get_comment_count(user_id)
+        key = "user_comment" + user_id.to_s
+        Thread.current[key.to_sym] ||= db.prepare('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?').execute(
+          user_id
+        ).first[:count]
+      end
+
       def make_posts(results, all_comments: false)
         posts = []
         results.to_a.each do |post|
@@ -143,10 +187,27 @@ module Isuconp
 
         "/image/#{post[:id]}#{ext}"
       end
+
+      def save_image(post)
+        File.open(File.expand_path('../../public', __FILE__) + image_url(post),'w') do |file|
+          file.write(post[:imgdata])
+        end
+      end
     end
 
     get '/initialize' do
       db_initialize
+      # save image from db
+      #db.query('SELECT * FROM `posts`').each do |post|
+      #  save_image(post)
+      #end
+
+      #Parallel.each(db.query('SELECT id FROM users')) do |user|
+      #  get_comment_count(user[:id])
+      #end
+
+      expire_first_posts()
+      expire_make_posts()
       return 200
     end
 
@@ -214,6 +275,8 @@ module Isuconp
         id: db.last_id
       }
       session[:csrf_token] = SecureRandom.hex(16)
+      comment_count_init(db.last_id)
+
       redirect '/', 302
     end
 
@@ -225,14 +288,13 @@ module Isuconp
     get '/' do
       me = get_session_user()
 
-      results = db.query('SELECT `id`, `user_id`, `body`, `created_at`, `mime` FROM `posts` ORDER BY `created_at` DESC LIMIT ' + (POSTS_PER_PAGE+100).to_s)
-      posts = make_posts(results)
+      posts = get_make_posts()
 
       erb :index, layout: :layout, locals: { posts: posts, me: me }
     end
 
     get '/@:account_name' do
-      user = db.prepare('SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0').execute(
+      user = db.prepare('SELECT * FROM `users` WHERE `account_name` = ? AND `del_flg` = 0 LIMIT 1').execute(
         params[:account_name]
       ).first
 
@@ -246,9 +308,7 @@ module Isuconp
       )
       posts = make_posts(results)
 
-      comment_count = db.prepare('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?').execute(
-        user[:id]
-      ).first[:count]
+      comment_count = get_comment_count(user[:id])
 
       post_ids = db.prepare('SELECT `id` FROM `posts` WHERE `user_id` = ?').execute(
         user[:id]
@@ -329,33 +389,23 @@ module Isuconp
         db.prepare(query).execute(
           me[:id],
           mime,
-          params["file"][:tempfile].read,
+          "",# params["file"][:tempfile].read,
           params["body"],
         )
         pid = db.last_id
-
+	post = {
+          id: pid,
+          mime: mime,
+          imgdata: params["file"][:tempfile].read
+        }
+        save_image(post)
+        expire_first_posts()
+        expire_make_posts()
         redirect "/posts/#{pid}", 302
       else
         flash[:notice] = '画像が必須です'
         redirect '/', 302
       end
-    end
-
-    get '/image/:id.:ext' do
-      if params[:id].to_i == 0
-        return ""
-      end
-
-      post = db.prepare('SELECT * FROM `posts` WHERE `id` = ?').execute(params[:id].to_i).first
-
-      if (params[:ext] == "jpg" && post[:mime] == "image/jpeg") ||
-          (params[:ext] == "png" && post[:mime] == "image/png") ||
-          (params[:ext] == "gif" && post[:mime] == "image/gif")
-        headers['Content-Type'] = post[:mime]
-        return post[:imgdata]
-      end
-
-      return 404
     end
 
     post '/comment' do
@@ -380,6 +430,7 @@ module Isuconp
         me[:id],
         params['comment']
       )
+      comment_count_increment(me[:id])
 
       redirect "/posts/#{post_id}", 302
     end

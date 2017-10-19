@@ -138,7 +138,7 @@ module Isuconp
       end
       def get_comment_count(user_id)
         key = "user_comment" + user_id.to_s
-        Thread.current[key.to_sym] ||= db.prepare('SELECT COUNT(*) AS count FROM `comments` WHERE `user_id` = ?').execute(
+        Thread.current[key.to_sym] ||= db.prepare('SELECT COUNT(id) AS count FROM `comments` WHERE `user_id` = ?').execute(
           user_id
         ).first[:count]
       end
@@ -146,23 +146,20 @@ module Isuconp
       def make_posts(results, all_comments: false)
         posts = []
         results.to_a.each do |post|
-          post[:comment_count] = db.prepare('SELECT COUNT(*) AS `count` FROM `comments` WHERE `post_id` = ?').execute(
-            post[:id]
-          ).first[:count]
+          all_post_comments = db.prepare('SELECT * FROM `comments` WHERE `post_id` = ?').execute(post[:id]).to_a
+          post[:comment_count] = all_post_comments.length
 
-          query = 'SELECT * FROM `comments` WHERE `post_id` = ? ORDER BY `created_at` DESC'
-          unless all_comments
-            query += ' LIMIT 3'
-          end
-          comments = db.prepare(query).execute(
-            post[:id]
-          ).to_a
+          comments = if all_comments
+                       all_post_comments.sort_by {|e| e[:created_at]}
+                     else
+                       all_post_comments.sort_by {|e| e[:created_at]}.take(3)
+                     end
           comments.each do |comment|
             comment[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
               comment[:user_id]
             ).first
           end
-          post[:comments] = comments.reverse
+          post[:comments] = comments
 
           post[:user] = db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
             post[:user_id]
@@ -318,7 +315,7 @@ module Isuconp
       commented_count = 0
       if post_count > 0
         placeholder = (['?'] * post_ids.length).join(",")
-        commented_count = db.prepare("SELECT COUNT(*) AS count FROM `comments` WHERE `post_id` IN (#{placeholder})").execute(
+        commented_count = db.prepare("SELECT COUNT(id) AS count FROM `comments` WHERE `post_id` IN (#{placeholder})").execute(
           *post_ids
         ).first[:count]
       end

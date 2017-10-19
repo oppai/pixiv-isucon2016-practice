@@ -2,28 +2,27 @@ require 'sinatra/base'
 require 'mysql2'
 require 'rack-flash'
 require 'shellwords'
-require "rack-lineprof"
-require 'redis'
-require 'parallel'
+#require "rack-lineprof"
+#require 'parallel'
 
 module Isuconp
   class App < Sinatra::Base
     use Rack::Session::Memcache, autofix_keys: true, secret: ENV['ISUCONP_SESSION_SECRET'] || 'sendagaya'
     use Rack::Flash
     set :public_folder, File.expand_path('../../public', __FILE__)
-    use Rack::Lineprof
+#    use Rack::Lineprof
 
     UPLOAD_LIMIT = 10 * 1024 * 1024 # 10mb
 
     POSTS_PER_PAGE = 20
 
     helpers do
-      def redis
-        unless @redis
-          @redis = Redis.new
-        end
-        @redis
-      end
+      #def redis
+      #  unless @redis
+      #    @redis = Redis.new
+      #  end
+      #  @redis
+      #end
 
       def config
         @config ||= {
@@ -100,9 +99,7 @@ module Isuconp
 
       def get_session_user()
         if session[:user]
-          db.prepare('SELECT * FROM `users` WHERE `id` = ?').execute(
-            session[:user][:id]
-          ).first
+          session[:user]
         else
           nil
         end
@@ -223,7 +220,12 @@ module Isuconp
       user = try_login(params['account_name'], params['password'])
       if user
         session[:user] = {
-          id: user[:id]
+          id: user[:id],
+          authority: user[:authority],
+          account_name: user[:account_name],
+          passhash: user[:passhash],
+          del_flg: user[:del_flg],
+          created_at: user[:created_at]
         }
         session[:csrf_token] = SecureRandom.hex(16)
         redirect '/', 302
@@ -263,14 +265,21 @@ module Isuconp
       end
 
       query = 'INSERT INTO `users` (`account_name`, `passhash`) VALUES (?,?)'
+      pass_hash = calculate_passhash(account_name, password)
       db.prepare(query).execute(
         account_name,
-        calculate_passhash(account_name, password)
+        pass_hash
       )
 
       session[:user] = {
-        id: db.last_id
+        id: db.last_id,
+        authority: 0,
+        account_name: account_name,
+        passhash: pass_hash,
+        del_flg: 0,
+        created_at: Time.now
       }
+
       session[:csrf_token] = SecureRandom.hex(16)
       comment_count_init(db.last_id)
 
